@@ -4,7 +4,7 @@ etcd-aws-cluster
 This container serves to assist in the creation of an etcd (2.x) cluster from an AWS auto scaling group. It writes a file to /etc/sysconfig/etcd-peers that contains parameters for etcd:
 
 - ETCD_INITIAL_CLUSTER_STATE
-  - either new or eixsting   
+  - either new or eixsting
   - used to specify whether we are creating a new cluster or joining an existing one
 - ETCD_NAME
   - the name of the machine joining the etcd cluster
@@ -20,6 +20,18 @@ This file can then be loaded as an EnvironmentFile in an etcd2 drop-in to proper
 EnvironmentFile=/etc/sysconfig/etcd-peers
 ```
 
+Multiple AutoScale Groups
+-------------------------
+
+To allow for multiple autoscale groups to act as a single cluster, you can use the following environment variables.
+
+* `ETCD_ASG_TAG_NAME` *(default: `EtcdClusterName`)*
+  * This is the name of the key of the tag that defines the etcd cluster. The various autoscale groups must all have the same `EtcdClusterName`
+* `ETCD_ASG_CLUSTER_NAME` *(default: `<blank>`)*
+  * This is the value of `EtcdClusterName` that you want to cluster using
+  * If left blank, this feature is disabled
+
+
 Workflow
 --------
 
@@ -31,9 +43,9 @@ Workflow
   if no machines respond OR there are existing peers but my instance id is listed as a member of the cluster  
 
     - assume that this is a new cluster
-    - write a file using the ids/ips of the autoscaling group 
-  
-  else 
+    - write a file using the ids/ips of the autoscaling group
+
+  else
 
     - assume that we are joining an existing cluster
     - check to see if any machines are listed as being part of the cluster but are not part of the autoscaling group

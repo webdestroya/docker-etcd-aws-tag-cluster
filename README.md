@@ -1,17 +1,18 @@
-etcd-aws-cluster
-==============
+# etcd-aws-tag-cluster
 
-This container serves to assist in the creation of an etcd (2.x) cluster from an AWS auto scaling group. It writes a file to /etc/sysconfig/etcd-peers that contains parameters for etcd:
+This is *heavily* based on the awesome [etcd-aws-cluster](https://github.com/MonsantoCo/etcd-aws-cluster) project by Monsanto.
 
-- ETCD_INITIAL_CLUSTER_STATE
-  - either new or eixsting
-  - used to specify whether we are creating a new cluster or joining an existing one
-- ETCD_NAME
-  - the name of the machine joining the etcd cluster
-  - this is obtained by getting the instance if from amazon of the host (e.g. i-694fad83)
-- ETCD_INITIAL_CLUSTER
-  - this is a list of the machines (id and ip) expected to be in the cluster, including the new machine
-  - e.g. "i-5fc4c9e1=http://10.0.0.1:2380,i-694fad83=http://10.0.0.2:2380"
+This container serves to assist in the creation of an etcd (2.x) cluster using EC2 instance tags. It writes a file to /etc/sysconfig/etcd-peers that contains parameters for etcd:
+
+* `ETCD_INITIAL_CLUSTER_STATE`
+  * either new or existing
+  * used to specify whether we are creating a new cluster or joining an existing one
+* `ETCD_NAME`
+  * the name of the machine joining the etcd cluster
+  * this is obtained by getting the instance if from amazon of the host (e.g. i-694fad83)
+* `ETCD_INITIAL_CLUSTER`
+  * this is a list of the machines (id and ip) expected to be in the cluster, including the new machine
+  * e.g. "i-5fc4c9e1=http://10.0.0.1:2380,i-694fad83=http://10.0.0.2:2380"
 
 This file can then be loaded as an EnvironmentFile in an etcd2 drop-in to properly configure etcd2:
 
@@ -20,20 +21,20 @@ This file can then be loaded as an EnvironmentFile in an etcd2 drop-in to proper
 EnvironmentFile=/etc/sysconfig/etcd-peers
 ```
 
-Multiple AutoScale Groups
--------------------------
 
-To allow for multiple autoscale groups to act as a single cluster, you can use the following environment variables.
+## Configuration
 
-* `ETCD_ASG_TAG_NAME` *(default: `EtcdClusterName`)*
-  * This is the name of the key of the tag that defines the etcd cluster. The various autoscale groups must all have the same `EtcdClusterName`
-* `ETCD_ASG_CLUSTER_NAME` *(default: `<blank>`)*
-  * This is the value of `EtcdClusterName` that you want to cluster using
-  * If left blank, this feature is disabled
+* `AWS_CLUSTER_TAG_KEY` *(default: `EtcdClusterName`)*
+  * This is the tag's key that defines which instances are part of the initial etcd cluster.
+* `AWS_CLUSTER_TAG_VALUE` **required**
+  * This is the value of the tag to filter EC2 instances using
+* `AWS_CLUSTER_ON_MISSING_TAG` *(default: `proxy`)*
+* `AWS_CLUSTER_PROXY_TYPE` *(default: `on`)*
+  * If the on-missing-tag option is set to `proxy`, then this determines the proxy mode to use. Allowed values are: `on` (readwrite) and `readonly`
 
 
-Workflow
---------
+
+## Workflow
 
 - get the instance id and ip from amazon
 - fetch the autoscaling group this machine belongs to
@@ -57,7 +58,7 @@ Workflow
 Usage
 -----
 
-```docker run -v /etc/sysconfig/:/etc/sysconfig/ MonsantoCo/etcd-aws-cluster```
+```docker run -v /etc/sysconfig/:/etc/sysconfig/ webdestroya/etcd-aws-tag-cluster```
 
 Demo
 ----

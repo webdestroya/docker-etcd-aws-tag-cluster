@@ -1,13 +1,21 @@
 #! /bin/bash
-pkg="etcd-aws-cluster"
-version="0.4"
+pkg="etcd-aws-tag-cluster"
+version="0.5"
 etcd_peers_file_path="/etc/sysconfig/etcd-peers"
 region=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq --raw-output .region)
 if [[ ! $region ]]; then
-    echo "$pkg: failed to get region"
-    exit 1
+  echo "$pkg: failed to get region"
+  exit 1
 fi
 
+tag_key=${AWS_CLUSTER_TAG_KEY-EtcdClusterName}
+tag_value=${AWS_CLUSTER_TAG_VALUE?"is required"}
+on_missing_tag=${AWS_CLUSTER_ON_MISSING_TAG-proxy}
+proxy_type=${AWS_CLUSTER_PROXY_TYPE-on}
+
+# Sometimes the metadata service times out
+aws configure set metadata_service_timeout 8
+aws configure set metadata_service_num_attempts 10
 
 # ETCD API https://coreos.com/etcd/docs/2.0.11/other_apis.html
 add_ok=201
@@ -16,38 +24,23 @@ delete_ok=204
 
 #if the script has already run just exit
 if [ -f "$etcd_peers_file_path" ]; then
-    echo "$pkg: etcd-peers file $etcd_peers_file_path already created, exiting"
-    exit 0
+  echo "$pkg: etcd-peers file $etcd_peers_file_path already created, exiting"
+  exit 0
 fi
 
 ec2_instance_id=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 if [[ ! $ec2_instance_id ]]; then
-    echo "$pkg: failed to get instance id from instance metadata"
-    exit 2
+  echo "$pkg: failed to get instance id from instance metadata"
+  exit 2
 fi
 
 ec2_instance_ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
 if [[ ! $ec2_instance_ip ]]; then
-    echo "$pkg: failed to get instance IP address"
-    exit 3
+  echo "$pkg: failed to get instance IP address"
+  exit 3
 fi
 
-
-etcd_asg_cluster_name=${ETCD_ASG_CLUSTER_NAME-}
-
-if [[ $etcd_asg_cluster_name ]]; then
-  etcd_asg_tag_name=${ETCD_ASG_TAG_NAME-EtcdClusterName}
-  asg_name=$(aws autoscaling describe-auto-scaling-groups --region $region | jq --raw-output ".AutoScalingGroups | map({cluster: (.Tags[] | select(.Key == \"$etcd_asg_tag_name\") | .Value ), asg: (.AutoScalingGroupName) }) | .[] | select(.cluster == \"$etcd_asg_cluster_name\") | .asg" | xargs)
-else
-  asg_name=$(aws autoscaling describe-auto-scaling-groups --region $region | jq --raw-output ".[] | map(select(.Instances[].InstanceId | contains(\"$ec2_instance_id\"))) | .[].AutoScalingGroupName")
-fi
-
-if [[ ! $asg_name ]]; then
-    echo "$pkg: failed to get the auto scaling group name"
-    exit 4
-fi
-
-etcd_peer_urls=$(aws ec2 describe-instances --region $region --instance-ids $(aws autoscaling describe-auto-scaling-groups --region $region --auto-scaling-group-names $asg_name | jq .AutoScalingGroups[].Instances[].InstanceId | xargs) | jq -r '.Reservations[].Instances | map("http://" + .NetworkInterfaces[].PrivateIpAddress + ":2379")[]')
+etcd_peer_urls=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-state-name,Values=running | jq -r '.Reservations[].Instances | map("http://" + .NetworkInterfaces[].PrivateIpAddress + ":2379")[]')
 if [[ ! $etcd_peer_urls ]]; then
     echo "$pkg: unable to find members of auto scaling group"
     exit 5
@@ -60,24 +53,47 @@ etcd_existing_peer_names=
 etcd_good_member_url=
 
 for url in $etcd_peer_urls; do
-    case "$url" in
-        *$ec2_instance_ip*) continue;;
-    esac
+  case "$url" in
+      *$ec2_instance_ip*) continue;;
+  esac
 
-    etcd_members=$(curl -f -s $url/v2/members)
+  etcd_members=$(curl -f -s $url/v2/members)
 
-    if [[ $? == 0 && $etcd_members ]]; then
-        etcd_good_member_url="$url"
-		echo "etcd_members=$etcd_members"
-        etcd_existing_peer_urls=$(echo "$etcd_members" | jq --raw-output .[][].peerURLs[0])
-		etcd_existing_peer_names=$(echo "$etcd_members" | jq --raw-output .[][].name)
-	break
-    fi
+  if [[ $? == 0 && $etcd_members ]]; then
+    etcd_good_member_url="$url"
+    echo "etcd_members=$etcd_members"
+    etcd_existing_peer_urls=$(echo "$etcd_members" | jq --raw-output .[][].peerURLs[0])
+    etcd_existing_peer_names=$(echo "$etcd_members" | jq --raw-output .[][].name)
+    break
+  fi
 done
 
 echo "etcd_good_member_url=$etcd_good_member_url"
 echo "etcd_existing_peer_urls=$etcd_existing_peer_urls"
 echo "etcd_existing_peer_names=$etcd_existing_peer_names"
+
+
+
+
+this_instance_in_group=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-id,Values=${ec2_instance_id} | jq --raw-output '.Reservations[]')
+if [[ ! $this_instance_in_group ]]; then
+  echo "missing EC2 tag for this cluster, assuming '$on_missing_tag' mode"
+
+  if [[ "$on_missing_tag" == "proxy" ]]; then
+    etcd_initial_cluster=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-state-name,Values=running | jq -r '.Reservations[].Instances | map(.InstanceId + "=http://" + .NetworkInterfaces[].PrivateIpAddress + ":2380")[]' | xargs | sed 's/  */,/g')
+    echo "etcd_initial_cluster=$etcd_initial_cluster"
+    cat > "$etcd_peers_file_path" <<EOF
+ETCD_INITIAL_CLUSTER_STATE=existing
+ETCD_NAME=$ec2_instance_id
+ETCD_PROXY=$proxy_type
+ETCD_INITIAL_CLUSTER="$etcd_initial_cluster"
+EOF
+    exit 0;
+  fi
+fi
+
+
+
 
 # if I am already listed as a member of the cluster assume that this is a new cluster
 if [[ $etcd_existing_peer_urls && $etcd_existing_peer_names != *"$ec2_instance_id"* ]]; then
@@ -130,7 +146,7 @@ else
     # create a new cluster
     echo "creating new cluster"
 
-    etcd_initial_cluster=$(aws ec2 describe-instances --region $region --instance-ids $(aws autoscaling describe-auto-scaling-groups --region $region --auto-scaling-group-names $asg_name | jq .AutoScalingGroups[].Instances[].InstanceId | xargs) | jq -r '.Reservations[].Instances | map(.InstanceId + "=http://" + .NetworkInterfaces[].PrivateIpAddress + ":2380")[]' | xargs | sed 's/  */,/g')
+    etcd_initial_cluster=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-state-name,Values=running | jq -r '.Reservations[].Instances | map(.InstanceId + "=http://" + .NetworkInterfaces[].PrivateIpAddress + ":2380")[]' | xargs | sed 's/  */,/g')
     echo "etcd_initial_cluster=$etcd_initial_cluster"
     if [[ ! $etcd_initial_cluster ]]; then
         echo "$pkg: unable to get peers from auto scaling group"

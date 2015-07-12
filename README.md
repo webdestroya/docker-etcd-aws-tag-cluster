@@ -32,6 +32,10 @@ EnvironmentFile=/etc/sysconfig/etcd-peers
 * `AWS_CLUSTER_PROXY_TYPE` *(default: `on`)*
   * If the on-missing-tag option is set to `proxy`, then this determines the proxy mode to use. Allowed values are: `on` (readwrite) and `readonly`
 
+* `FAIL_ON_BAD_PEER_REMOVAL_ERROR` *(default: true)*
+  * If true, the system will exit with a return code if we get an error response when removing bad peers from the cluster. Otherwise, it will continue
+* `FAIL_ON_JOIN_CLUSTER_ERROR` *(default: true)*
+  * Same as above, except when errors happen during member registration
 
 
 ## Workflow

@@ -12,6 +12,8 @@ tag_key=${AWS_CLUSTER_TAG_KEY-EtcdClusterName}
 tag_value=${AWS_CLUSTER_TAG_VALUE?"is required"}
 on_missing_tag=${AWS_CLUSTER_ON_MISSING_TAG-proxy}
 proxy_type=${AWS_CLUSTER_PROXY_TYPE-on}
+fail_on_bad_peer_error=${FAIL_ON_BAD_PEER_REMOVAL_ERROR-true}
+fail_on_join_cluster_error=${FAIL_ON_JOIN_CLUSTER_ERROR-true}
 
 # Sometimes the metadata service times out
 aws configure set metadata_service_timeout 8
@@ -42,8 +44,8 @@ fi
 
 etcd_peer_urls=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-state-name,Values=running | jq -r '.Reservations[].Instances | map("http://" + .NetworkInterfaces[].PrivateIpAddress + ":2379")[]')
 if [[ ! $etcd_peer_urls ]]; then
-    echo "$pkg: unable to find members of auto scaling group"
-    exit 5
+  echo "$pkg: unable to find members of auto scaling group"
+  exit 5
 fi
 
 echo "etcd_peer_urls=$etcd_peer_urls"
@@ -72,9 +74,6 @@ echo "etcd_good_member_url=$etcd_good_member_url"
 echo "etcd_existing_peer_urls=$etcd_existing_peer_urls"
 echo "etcd_existing_peer_names=$etcd_existing_peer_names"
 
-
-
-
 this_instance_in_group=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-id,Values=${ec2_instance_id} | jq --raw-output '.Reservations[]')
 if [[ ! $this_instance_in_group ]]; then
   echo "missing EC2 tag for this cluster, assuming '$on_missing_tag' mode"
@@ -99,6 +98,7 @@ fi
 if [[ $etcd_existing_peer_urls && $etcd_existing_peer_names != *"$ec2_instance_id"* ]]; then
     echo "joining existing cluster"
 
+
     # eject bad members from cluster
     peer_regexp=$(echo "$etcd_peer_urls" | sed 's/^.*http:\/\/\([0-9.]*\):[0-9]*.*$/contains(\\"\1\\")/' | xargs | sed 's/  */ or /g')
     if [[ ! $peer_regexp ]]; then
@@ -111,29 +111,36 @@ if [[ $etcd_existing_peer_urls && $etcd_existing_peer_names != *"$ec2_instance_i
     echo "bad_peer=$bad_peer"
 
     if [[ $bad_peer ]]; then
-        for bp in $bad_peer; do
-            echo "removing bad peer $bp"
-            status=$(curl -f -s -w %{http_code} "$etcd_good_member_url/v2/members/$bp" -XDELETE)
-            if [[ $status != $delete_ok ]]; then
-                echo "$pkg: ERROR: failed to remove bad peer: $bad_peer, return code $status."
-                exit 7
-            fi
-        done
+      for bp in $bad_peer; do
+        echo "removing bad peer $bp"
+        status=$(curl -f -s -w %{http_code} "$etcd_good_member_url/v2/members/$bp" -XDELETE)
+        if [[ $status != $delete_ok ]]; then
+          echo "$pkg: ERROR: failed to remove bad peer: $bad_peer, return code $status."
+
+          # Only fail out if explicitly told to do so
+          if [[ $fail_on_bad_peer_error == "true" ]]; then
+            exit 7;
+          fi
+        fi
+      done
     fi
 
     etcd_initial_cluster=$(curl -s -f "$etcd_good_member_url/v2/members" | jq --raw-output '.[] | map(.name + "=" + .peerURLs[0]) | .[]' | xargs | sed 's/  */,/g')$(echo ",$ec2_instance_id=http://${ec2_instance_ip}:2380")
     echo "etcd_initial_cluster=$etcd_initial_cluster"
     if [[ ! $etcd_initial_cluster ]]; then
-        echo "$pkg: docker command to get etcd peers failed"
-        exit 8
+      echo "$pkg: docker command to get etcd peers failed"
+      exit 8
     fi
 
     # join an existing cluster
     echo "adding instance ID $ec2_instance_id with IP $ec2_instance_ip"
     status=$(curl -f -s -w %{http_code} -o /dev/null -XPOST "$etcd_good_member_url/v2/members" -H "Content-Type: application/json" -d "{\"peerURLs\": [\"http://$ec2_instance_ip:2380\"], \"name\": \"$ec2_instance_id\"}")
     if [[ $status != $add_ok && $status != $already_added ]]; then
-        echo "$pkg: unable to add $ec2_instance_ip to the cluster: return code $status."
-    	exit 9
+      echo "$pkg: unable to add $ec2_instance_ip to the cluster: return code $status."
+
+      if [[ $fail_on_join_cluster_error == "true" ]]; then
+    	  exit 9
+      fi
     fi
 
     cat > "$etcd_peers_file_path" <<EOF
@@ -149,8 +156,8 @@ else
     etcd_initial_cluster=$(aws ec2 describe-instances --region $region --filters Name=tag:${tag_key},Values=${tag_value} Name=instance-state-name,Values=running | jq -r '.Reservations[].Instances | map(.InstanceId + "=http://" + .NetworkInterfaces[].PrivateIpAddress + ":2380")[]' | xargs | sed 's/  */,/g')
     echo "etcd_initial_cluster=$etcd_initial_cluster"
     if [[ ! $etcd_initial_cluster ]]; then
-        echo "$pkg: unable to get peers from auto scaling group"
-        exit 10
+      echo "$pkg: unable to get peers from auto scaling group"
+      exit 10
     fi
 
     cat > "$etcd_peers_file_path" <<EOF
